@@ -1,0 +1,207 @@
+services:
+  mariadb:
+    image: mariadb:10.11
+    container_name: erp-mariadb
+    restart: unless-stopped
+    networks:
+      - internal
+    env_file: .env
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD}
+      MARIADB_DATABASE: erpnext
+      MARIADB_USER: erpnext
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD}
+      TZ: Europe/Moscow
+    volumes:
+      - mariadb-data:/var/lib/mysql
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --innodb-read-only-compressed=OFF
+      - --innodb-strict-mode=OFF
+      - --max-allowed-packet=64M
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis-cache:
+    image: redis:8-alpine
+    container_name: erp-redis-cache
+    restart: unless-stopped
+    networks:
+      - internal
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save ""
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis-queue:
+    image: redis:8-alpine
+    container_name: erp-redis-queue
+    restart: unless-stopped
+    networks:
+      - internal
+    command: redis-server --maxmemory 128mb --maxmemory-policy noeviction --appendonly yes
+    volumes:
+      - redis-queue-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    image: frappe/erpnext:v15
+    container_name: erpnext-web
+    restart: unless-stopped
+    networks:
+      - internal
+    env_file: .env
+    environment:
+      FRAPPE_SITE_NAME_HEADER: ${SITE_NAME:-visiontech}
+      DB_HOST: mariadb
+      DB_PORT: "3306"
+      DB_NAME: erpnext
+      DB_USER: erpnext
+      DB_PASSWORD: ${MARIADB_PASSWORD}
+      REDIS_CACHE: redis://redis-cache:6379
+      REDIS_QUEUE: redis://redis-queue:6379
+      REDIS_SOCKETIO: redis://redis-queue:6379
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+      redis-queue:
+        condition: service_healthy
+    volumes:
+      - erpnext-sites:/home/frappe/frappe-bench/sites
+
+  erpnext-websocket:
+    image: frappe/erpnext:v15
+    container_name: erpnext-websocket
+    restart: unless-stopped
+    networks:
+      - internal
+    env_file: .env
+    environment:
+      WORKER_TYPE: websocket
+      DB_HOST: mariadb
+      REDIS_CACHE: redis://redis-cache:6379
+      REDIS_QUEUE: redis://redis-queue:6379
+      REDIS_SOCKETIO: redis://redis-queue:6379
+    depends_on:
+      backend:
+        condition: service_started
+    volumes:
+      - erpnext-sites:/home/frappe/frappe-bench/sites
+
+  erpnext-scheduler:
+    image: frappe/erpnext:v15
+    container_name: erpnext-scheduler
+    restart: on-failure
+    networks:
+      - internal
+    env_file: .env
+    environment:
+      WORKER_TYPE: scheduler
+      DB_HOST: mariadb
+      REDIS_CACHE: redis://redis-cache:6379
+      REDIS_QUEUE: redis://redis-queue:6379
+      REDIS_SOCKETIO: redis://redis-queue:6379
+    depends_on:
+      backend:
+        condition: service_started
+    volumes:
+      - erpnext-sites:/home/frappe/frappe-bench/sites
+
+  erpnext-worker-default:
+    image: frappe/erpnext:v15
+    container_name: erpnext-worker-default
+    restart: on-failure
+    networks:
+      - internal
+    env_file: .env
+    environment:
+      WORKER_TYPE: default
+      DB_HOST: mariadb
+      REDIS_CACHE: redis://redis-cache:6379
+      REDIS_QUEUE: redis://redis-queue:6379
+      REDIS_SOCKETIO: redis://redis-queue:6379
+    depends_on:
+      backend:
+        condition: service_started
+    volumes:
+      - erpnext-sites:/home/frappe/frappe-bench/sites
+
+  erpnext-worker-long:
+    image: frappe/erpnext:v15
+    container_name: erpnext-worker-long
+    restart: on-failure
+    networks:
+      - internal
+    env_file: .env
+    environment:
+      WORKER_TYPE: long
+      DB_HOST: mariadb
+      REDIS_CACHE: redis://redis-cache:6379
+      REDIS_QUEUE: redis://redis-queue:6379
+      REDIS_SOCKETIO: redis://redis-queue:6379
+    depends_on:
+      backend:
+        condition: service_started
+    volumes:
+      - erpnext-sites:/home/frappe/frappe-bench/sites
+
+  minio:
+    image: minio/minio:latest
+    container_name: erp-minio
+    restart: unless-stopped
+    networks:
+      - internal
+    env_file: .env
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-zhaben}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  nginx:
+    image: frappe/erpnext:v15
+    container_name: erp-nginx
+    restart: unless-stopped
+    command: nginx-entrypoint.sh
+    networks:
+      - internal
+    ports:
+      - "${HTTP_PUBLISH_PORT:-80}:8080"
+      - "${HTTPS_PUBLISH_PORT:-443}:443"
+    environment:
+      BACKEND: backend:8000
+      SOCKETIO: erpnext-websocket:9000
+      FRAPPE_SITE_NAME_HEADER: visiontech
+      UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
+    volumes:
+      - erpnext-sites:/home/frappe/frappe-bench/sites
+    depends_on:
+      backend:
+        condition: service_started
+
+volumes:
+  mariadb-data: { driver: local }
+  redis-queue-data: { driver: local }
+  erpnext-sites: { driver: local }
+  minio-data: { driver: local }
+
+networks:
+  internal: { driver: bridge }

@@ -1,0 +1,6 @@
+.env
+.env.*
+!.env.example
+erpnext.conf.bak
+docker-compose.yml.bak
+docker-compose.yml2.bak
